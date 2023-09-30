@@ -252,6 +252,7 @@ def train(config):
         max_grad_norm=config.max_grad_norm,
         fp16=config.fp16,
         push_to_hub=False,
+        logging_strategy="steps",
         load_best_model_at_end=True if config.valid_split is not None else False,
         ddp_find_unused_parameters=False,
     )
