@@ -20,11 +20,15 @@ from transformers import (
     TrainingArguments,
     default_data_collator,
 )
+from transformers.utils import quantization_config
 from trl import SFTTrainer
 
 from autotrain import logger
 from autotrain.trainers.clm import utils
-from autotrain.trainers.clm.callbacks import LoadBestPeftModelCallback, SavePeftModelCallback
+from autotrain.trainers.clm.callbacks import (
+    LoadBestPeftModelCallback,
+    SavePeftModelCallback,
+)
 from autotrain.trainers.clm.params import LLMTrainingParams
 from autotrain.utils import monitor
 
@@ -54,6 +58,7 @@ def train(config):
         if os.path.exists(train_path):
             logger.info("loading dataset from csv")
             train_data = pd.read_csv(train_path)
+            logger.info(f"{train_data.head()}")
             train_data = Dataset.from_pandas(train_data)
         else:
             train_data = load_dataset(
@@ -67,6 +72,7 @@ def train(config):
         if os.path.exists(valid_path):
             logger.info("loading dataset from csv")
             valid_data = pd.read_csv(valid_path)
+            logger.info(f"{valid_data.head()}")
             valid_data = Dataset.from_pandas(valid_data)
         else:
             valid_data = load_dataset(
@@ -107,6 +113,13 @@ def train(config):
     )
 
     if config.use_peft:
+        extra_confs = dict(
+            trust_remote_code=True,
+            device_map={"": Accelerator().process_index} if torch.cuda.is_available() else None,
+            torch_dtype=torch.float16,
+            config=model_config,
+            token=config.token,
+        )
         if config.use_int4:
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=config.use_int4,
@@ -117,25 +130,18 @@ def train(config):
         elif config.use_int8:
             bnb_config = BitsAndBytesConfig(load_in_8bit=config.use_int8)
         else:
-            bnb_config = BitsAndBytesConfig()
+            bnb_config = None
 
-        model = AutoModelForCausalLM.from_pretrained(
-            config.model,
-            config=model_config,
-            token=config.token,
-            quantization_config=bnb_config,
-            torch_dtype=torch.float16,
-            device_map={"": Accelerator().process_index} if torch.cuda.is_available() else None,
-            trust_remote_code=True,
-            use_flash_attention_2=config.use_flash_attention_2,
-        )
+        if bnb_config:
+            extra_confs.update(dict(quantization_config=bnb_config))
+
+        model = AutoModelForCausalLM.from_pretrained(config.model, **extra_confs)
     else:
         model = AutoModelForCausalLM.from_pretrained(
             config.model,
             config=model_config,
             token=config.token,
             trust_remote_code=True,
-            use_flash_attention_2=config.use_flash_attention_2,
         )
 
     model.resize_token_embeddings(len(tokenizer))
@@ -230,7 +236,9 @@ def train(config):
         per_device_eval_batch_size=config.batch_size,
         learning_rate=config.lr,
         num_train_epochs=config.epochs,
-        evaluation_strategy=config.evaluation_strategy if config.valid_split is not None else "no",
+        evaluation_strategy=config.evaluation_strategy
+        if config.valid_split is not None
+        else "no",
         logging_steps=logging_steps,
         save_total_limit=config.save_total_limit,
         save_strategy=config.save_strategy,
@@ -320,18 +328,31 @@ def train(config):
             )
         except Exception as e:
             logger.warning(f"Failed to merge adapter weights: {e}")
-            logger.warning("Skipping adapter merge. Only adapter weights will be saved.")
+            logger.warning(
+                "Skipping adapter merge. Only adapter weights will be saved."
+            )
 
     if config.push_to_hub:
         if PartialState().process_index == 0:
             logger.info("Pushing model to hub...")
             if os.path.exists(f"{config.project_name}/training_params.json"):
-                training_params = json.load(open(f"{config.project_name}/training_params.json"))
+                training_params = json.load(
+                    open(f"{config.project_name}/training_params.json")
+                )
                 training_params.pop("token")
-                json.dump(training_params, open(f"{config.project_name}/training_params.json", "w"))
+                json.dump(
+                    training_params,
+                    open(f"{config.project_name}/training_params.json", "w"),
+                )
             api = HfApi(token=config.token)
-            api.create_repo(repo_id=config.repo_id, repo_type="model", private=True)
-            api.upload_folder(folder_path=config.project_name, repo_id=config.repo_id, repo_type="model")
+            api.create_repo(
+                repo_id=config.repo_id, repo_type="model", private=True, exist_ok=True
+            )
+            api.upload_folder(
+                folder_path=config.project_name,
+                repo_id=config.repo_id,
+                repo_type="model",
+            )
 
     if PartialState().process_index == 0:
         if "SPACE_ID" in os.environ:

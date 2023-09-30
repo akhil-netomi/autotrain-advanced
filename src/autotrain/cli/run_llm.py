@@ -407,10 +407,12 @@ class RunAutoTrainLLMCommand(BaseAutoTrainCommand):
                     break
                 print(f"Bot: {tgi.chat(prompt)}")
 
-        if not torch.cuda.is_available():
+        if not torch.cuda.is_available() and torch.backends.mps.is_available():
+            self.num_gpus = "mac"
+        elif not torch.cuda.is_available():
             raise ValueError("No GPU found. Please install CUDA and try again.")
-
-        self.num_gpus = torch.cuda.device_count()
+        else:
+            self.num_gpus = torch.cuda.device_count()
 
     def run(self):
         from autotrain.backend import EndpointsRunner, SpaceRunner
@@ -490,6 +492,9 @@ class RunAutoTrainLLMCommand(BaseAutoTrainCommand):
             else:
                 cmd = ["accelerate", "launch", "--multi_gpu", "--num_machines", "1", "--num_processes"]
                 cmd.append(str(self.num_gpus))
+                if self.num_gpus=="mac":
+                    cmd.pop()
+                    cmd.pop()
                 cmd.append("--mixed_precision")
                 if self.args.fp16:
                     cmd.append("fp16")
