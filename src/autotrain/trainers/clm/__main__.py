@@ -344,6 +344,9 @@ def train(config):
                     training_params,
                     open(f"{config.project_name}/training_params.json", "w"),
                 )
+                config_json = json.load(f"{config.project_name}/config.json"))
+                config_json["_name_or_path"] = config.project_name
+                json.dump(config_json, open(f"{config.project_name}/config.json", "w"))
             api = HfApi(token=config.token)
             api.create_repo(
                 repo_id=config.repo_id, repo_type="model", private=True, exist_ok=True
