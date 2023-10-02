@@ -261,7 +261,7 @@ def train(config):
 
     args = TrainingArguments(**training_args)
 
-    callbacks = [EvaluateOnEveryPercentCallback(10)]
+    callbacks = [EvaluateOnEveryPercentCallback([10,20,30,40,50,60,70,80,90])]
     if config.use_peft:
         callbacks.append(SavePeftModelCallback)
         if config.valid_split is not None:
