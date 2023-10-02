@@ -18,6 +18,7 @@ from transformers import (
     BitsAndBytesConfig,
     Trainer,
     TrainingArguments,
+    EvalPrediction,
     default_data_collator,
 )
 from transformers.utils import quantization_config
@@ -59,7 +60,7 @@ def train(config):
         if os.path.exists(train_path):
             logger.info("loading dataset from csv")
             train_data = pd.read_csv(train_path)
-            logger.info(f"{train_data.head()}")
+            logger.info(f"{train_data}")
             train_data = Dataset.from_pandas(train_data)
         else:
             train_data = load_dataset(
@@ -73,7 +74,7 @@ def train(config):
         if os.path.exists(valid_path):
             logger.info("loading dataset from csv")
             valid_data = pd.read_csv(valid_path)
-            logger.info(f"{valid_data.head()}")
+            logger.info(f"{valid_data}")
             valid_data = Dataset.from_pandas(valid_data)
         else:
             valid_data = load_dataset(
@@ -271,6 +272,11 @@ def train(config):
         args=args,
         model=model,
     )
+    def compute_metrics(eval_preds: EvalPrediction):
+        predictions, label_ids, inputs = eval_preds.predictions, eval_preds.label_ids, eval_preds.inputs
+        x = tokenizer.batch_decode(label_ids)
+        print(x[0])
+        return {"temp": 5}
 
     if config.trainer == "default":
         trainer = Trainer(
@@ -279,7 +285,7 @@ def train(config):
             eval_dataset=valid_data if config.valid_split is not None else None,
             tokenizer=tokenizer,
             data_collator=default_data_collator,
-            compute_metrics=utils.compute_metrics,
+            compute_metrics=compute_metrics,
             callbacks=callbacks,
         )
     elif config.trainer == "sft":
