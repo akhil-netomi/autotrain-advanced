@@ -42,7 +42,6 @@ class LoadBestPeftModelCallback(TrainerCallback):
         return control
 
 class EvaluateOnEveryPercentCallback(TrainerCallback):
-    steps_done = set([0])
     def __init__(self) -> None:
         super().__init__()
 
@@ -50,7 +49,7 @@ class EvaluateOnEveryPercentCallback(TrainerCallback):
         curr_step = state.global_step
         max_steps = state.max_steps
         percent = int(100*(curr_step//max_steps))
-        print(percent, EvaluateOnEveryPercentCallback.steps_done)
+        print(percent, EvaluateOnEveryPercentCallback.steps_done, state.__dict__)
         if percent not in EvaluateOnEveryPercentCallback.steps_done:
             EvaluateOnEveryPercentCallback.steps_done.add(percent)
             control.should_evaluate = True
