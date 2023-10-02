@@ -8,7 +8,6 @@ from sklearn.metrics import mean_squared_error
 from scipy.spatial.distance import cosine
 import torch.nn.functional as F
 
-
 class SavePeftModelCallback(TrainerCallback):
     def on_save(
         self,
@@ -44,14 +43,14 @@ class LoadBestPeftModelCallback(TrainerCallback):
 class EvaluateOnEveryPercentCallback(TrainerCallback):
     def __init__(self, n) -> None:
         super().__init__()
-        self.steps_to_eval = [i for i in range(10, 100, 100//n)]
+        self.steps = [i for i in range(10, 100, 100//n)]
 
     def on_step_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         curr_step = state.global_step
         max_steps = state.max_steps
         percent = int(100*(curr_step//max_steps))
-        print(self.steps_to_eval)
-        if percent in self.steps_to_eval:
-            self.steps_to_eval = self.steps_to_eval.remove(percent)
+        print(self.steps)
+        if percent in self.steps:
+            self.steps.remove(percent)
             control.should_evaluate = True
         return control
