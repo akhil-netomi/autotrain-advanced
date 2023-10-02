@@ -28,6 +28,7 @@ from autotrain.trainers.clm import utils
 from autotrain.trainers.clm.callbacks import (
     LoadBestPeftModelCallback,
     SavePeftModelCallback,
+    EvaluateOnEveryPercentCallback
 )
 from autotrain.trainers.clm.params import LLMTrainingParams
 from autotrain.utils import monitor
@@ -260,7 +261,7 @@ def train(config):
 
     args = TrainingArguments(**training_args)
 
-    callbacks = []
+    callbacks = [EvaluateOnEveryPercentCallback]
     if config.use_peft:
         callbacks.append(SavePeftModelCallback)
         if config.valid_split is not None:
