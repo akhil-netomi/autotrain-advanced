@@ -44,7 +44,7 @@ class EvaluateOnEveryPercentCallback(TrainerCallback):
     def __init__(self, n) -> None:
         self.n = n
     
-    def on_train_begin(self):
+    def on_train_begin(self, args, state, control, **kwargs):
         self.steps = [i for i in range(10, 100, 100//self.n)]
 
     def on_step_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
