@@ -158,6 +158,7 @@ def train(config):
             target_modules=utils.get_target_modules(config),
         )
         model = get_peft_model(model, peft_config)
+        model.print_trainable_parameters()
 
     if config.block_size == -1:
         config.block_size = None
