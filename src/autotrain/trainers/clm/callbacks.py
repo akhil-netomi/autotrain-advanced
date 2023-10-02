@@ -52,6 +52,6 @@ class EvaluateOnEveryPercentCallback(TrainerCallback):
         percent = int(100*(curr_step//max_steps))
         print(self.steps_to_eval)
         if percent in self.steps_to_eval:
-            self.steps_to_eval.remove(percent)
+            self.steps_to_eval = self.steps_to_eval.remove(percent)
             control.should_evaluate = True
         return control
