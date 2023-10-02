@@ -32,8 +32,8 @@ widget:
 """
 def compute_metrics(eval_preds: EvalPrediction):
     predictions, label_ids, inputs = eval_preds.predictions, eval_preds.label_ids, eval_preds.inputs
-    print(f"predictions: {predictions}")
-    print(f"label_ids: {label_ids}")
+    print(f"predictions: {predictions.shape}")
+    print(f"label_ids: {label_ids.shape}")
     print(f"inputs: {inputs}")
     return {"temp": 5}
 
