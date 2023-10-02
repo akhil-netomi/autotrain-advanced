@@ -279,6 +279,7 @@ def train(config):
             eval_dataset=valid_data if config.valid_split is not None else None,
             tokenizer=tokenizer,
             data_collator=default_data_collator,
+            compute_metrics=utils.compute_metrics,
             callbacks=callbacks,
         )
     elif config.trainer == "sft":
@@ -289,6 +290,7 @@ def train(config):
             peft_config=peft_config if config.use_peft else None,
             dataset_text_field=config.text_column,
             max_seq_length=config.block_size,
+            compute_metrics=utils.compute_metrics,
             tokenizer=tokenizer,
             packing=True,
         )
@@ -347,9 +349,9 @@ def train(config):
                     training_params,
                     open(f"{config.project_name}/training_params.json", "w"),
                 )
-                config_json = json.load(open(f"{config.project_name}/config.json"))
-                config_json["_name_or_path"] = config.project_name
-                json.dump(config_json, open(f"{config.project_name}/config.json", "w"))
+                # config_json = json.load(open(f"{config.project_name}/config.json"))
+                # config_json["_name_or_path"] = config.project_name
+                # json.dump(config_json, open(f"{config.project_name}/config.json", "w"))
             api = HfApi(token=config.token)
             api.create_repo(
                 repo_id=config.repo_id, repo_type="model", private=True, exist_ok=True

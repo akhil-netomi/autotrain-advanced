@@ -50,6 +50,7 @@ class EvaluateOnEveryPercentCallback(TrainerCallback):
         curr_step = state.global_step
         max_steps = state.max_steps
         percent = int(100*(curr_step//max_steps))
+        print(percent, self.steps_done)
         if percent not in self.steps_done:
             self.steps_done.add(percent)
             control.should_evaluate = True
