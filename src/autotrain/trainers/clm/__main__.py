@@ -296,7 +296,7 @@ def train(config):
             peft_config=peft_config if config.use_peft else None,
             dataset_text_field=config.text_column,
             max_seq_length=config.block_size,
-            compute_metrics=utils.compute_metrics,
+            compute_metrics=compute_metrics,
             tokenizer=tokenizer,
             packing=True,
         )
