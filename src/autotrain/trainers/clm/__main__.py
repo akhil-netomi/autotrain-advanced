@@ -21,6 +21,8 @@ from transformers import (
     EvalPrediction,
     default_data_collator,
 )
+import evaluate
+import numpy as np
 from transformers.utils import quantization_config
 from trl import SFTTrainer
 
@@ -272,11 +274,30 @@ def train(config):
         args=args,
         model=model,
     )
+    
     def compute_metrics(eval_preds: EvalPrediction):
         predictions, label_ids, inputs = eval_preds.predictions, eval_preds.label_ids, eval_preds.inputs
-        x = tokenizer.batch_decode(label_ids)
-        print(x[0])
-        return {"temp": 5}
+        # label_ids[label_ids==-100] = tokenizer.pad_token_id
+        predictions = np.argmax(predictions, -1)
+        preds, refs = [], []
+        bleu = evaluate.load("bleu")
+        rouge = evaluate.load("rouge")
+        for pred, labels in zip(predictions, label_ids):
+            npr, nl = [], []
+            for ptok, ltok in zip(pred, labels):
+                if ltok == -100: continue
+                npr.append(ptok)
+                nl.append(ltok)
+            preds.append(tokenizer.decode(npr))
+            refs.append([tokenizer.decode(nl)])
+        rouge_results = rouge.compute(predictions=preds, references=refs)
+        bleu_results = bleu.compute(predictions=preds, references=refs)
+        rouge_results = {"rouge_"+k:v for k, v in rouge_results.items()}
+        bleu_results = {"bleu_"+k:v for k, v in bleu_results.items()}
+        metrics = {}
+        metrics.update(rouge_results)
+        metrics.update(bleu_results)
+        return metrics
 
     if config.trainer == "default":
         trainer = Trainer(
@@ -298,7 +319,7 @@ def train(config):
             max_seq_length=config.block_size,
             compute_metrics=compute_metrics,
             tokenizer=tokenizer,
-            packing=True,
+            packing=False,
         )
     else:
         raise ValueError(f"trainer `{config.trainer}` not supported")
