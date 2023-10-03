@@ -264,7 +264,7 @@ def train(config):
 
     args = TrainingArguments(**training_args)
 
-    callbacks = [EvaluateOnEveryPercentCallback([10,20,30,40,50,60,70,80,90])]
+    callbacks = [EvaluateOnEveryPercentCallback([25, 50, 75, 90])]
     if config.use_peft:
         callbacks.append(SavePeftModelCallback)
         if config.valid_split is not None:
@@ -274,10 +274,9 @@ def train(config):
         args=args,
         model=model,
     )
-    
+
     def compute_metrics(eval_preds: EvalPrediction):
         predictions, label_ids, inputs = eval_preds.predictions, eval_preds.label_ids, eval_preds.inputs
-        # label_ids[label_ids==-100] = tokenizer.pad_token_id
         predictions = np.argmax(predictions, -1)
         preds, refs = [], []
         bleu = evaluate.load("bleu")
@@ -319,7 +318,7 @@ def train(config):
             max_seq_length=config.block_size,
             compute_metrics=compute_metrics,
             tokenizer=tokenizer,
-            packing=False,
+            packing=True,
         )
     else:
         raise ValueError(f"trainer `{config.trainer}` not supported")
