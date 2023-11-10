@@ -1,10 +1,12 @@
 import os
-
 import torch
 from peft import set_peft_model_state_dict
 from transformers import TrainerCallback, TrainerControl, TrainerState, TrainingArguments
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
-
+from transformers import TrainerCallback, TrainingArguments, Trainer
+from sklearn.metrics import mean_squared_error
+from scipy.spatial.distance import cosine
+import torch.nn.functional as F
 
 class SavePeftModelCallback(TrainerCallback):
     def on_save(
@@ -36,4 +38,17 @@ class LoadBestPeftModelCallback(TrainerCallback):
         adapters_weights = torch.load(best_model_path)
         model = kwargs["model"]
         set_peft_model_state_dict(model, adapters_weights)
+        return control
+
+class EvaluateOnEveryPercentCallback(TrainerCallback):
+    def __init__(self, n) -> None:
+        self.steps = n
+
+    def on_step_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        curr_step = state.global_step
+        max_steps = state.max_steps
+        percent = int(100*(curr_step/max_steps))
+        if percent in self.steps:
+            self.steps.remove(percent)
+            control.should_evaluate = True
         return control

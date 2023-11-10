@@ -5,7 +5,7 @@ import requests
 import torch
 from datasets import Dataset
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, EvalPrediction
 
 from autotrain import logger
 
@@ -32,8 +32,9 @@ widget:
 - text: "I love AutoTrain because "
 ---
 
-# Model Trained Using AutoTrain
+# Model is trained using Netomi LLM Trainer
 """
+
 
 
 def preprocess_reward(examples, tokenizer):

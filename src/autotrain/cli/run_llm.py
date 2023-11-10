@@ -476,7 +476,7 @@ class RunAutoTrainLLMCommand(BaseAutoTrainCommand):
             self.num_gpus = torch.cuda.device_count()
         elif mps_available:
             self.num_gpus = 1
-
+            
     def run(self):
         from autotrain.backend import EndpointsRunner, SpaceRunner
         from autotrain.trainers.clm.__main__ import train as train_llm
@@ -568,6 +568,9 @@ class RunAutoTrainLLMCommand(BaseAutoTrainCommand):
                     "--num_processes",
                 ]
                 cmd.append(str(self.num_gpus))
+                if self.num_gpus=="mac":
+                    cmd.pop()
+                    cmd.pop()
                 cmd.append("--mixed_precision")
                 if self.args.fp16:
                     cmd.append("fp16")

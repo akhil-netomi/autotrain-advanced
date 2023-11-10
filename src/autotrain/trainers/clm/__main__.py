@@ -19,13 +19,23 @@ from transformers import (
     BitsAndBytesConfig,
     Trainer,
     TrainingArguments,
+    EvalPrediction,
     default_data_collator,
 )
+
 from trl import DPOTrainer, RewardConfig, RewardTrainer, SFTTrainer
+import evaluate
+import numpy as np
+from transformers.utils import quantization_config
+from trl import SFTTrainer
 
 from autotrain import logger
 from autotrain.trainers.clm import utils
-from autotrain.trainers.clm.callbacks import LoadBestPeftModelCallback, SavePeftModelCallback
+from autotrain.trainers.clm.callbacks import (
+    LoadBestPeftModelCallback,
+    SavePeftModelCallback,
+    EvaluateOnEveryPercentCallback
+)
 from autotrain.trainers.clm.params import LLMTrainingParams
 from autotrain.utils import monitor
 
@@ -51,6 +61,7 @@ def train(config):
         if os.path.exists(train_path):
             logger.info("loading dataset from csv")
             train_data = pd.read_csv(train_path)
+            logger.info(f"{train_data}")
             train_data = Dataset.from_pandas(train_data)
         else:
             train_data = load_dataset(
@@ -74,6 +85,7 @@ def train(config):
         if os.path.exists(valid_path):
             logger.info("loading dataset from csv")
             valid_data = pd.read_csv(valid_path)
+            logger.info(f"{valid_data}")
             valid_data = Dataset.from_pandas(valid_data)
         else:
             valid_data = load_dataset(
@@ -132,6 +144,13 @@ def train(config):
         model_config.pad_token = tokenizer.pad_token
 
     if config.use_peft:
+        extra_confs = dict(
+            trust_remote_code=True,
+            device_map={"": Accelerator().process_index} if torch.cuda.is_available() else None,
+            torch_dtype=torch.float16,
+            config=model_config,
+            token=config.token,
+        )
         if config.use_int4:
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=config.use_int4,
@@ -194,6 +213,7 @@ def train(config):
                     use_flash_attention_2=config.use_flash_attention_2,
                 )
 
+
     model.resize_token_embeddings(len(tokenizer))
 
     if config.use_peft:
@@ -224,6 +244,7 @@ def train(config):
                 target_modules=utils.get_target_modules(config),
             )
         model = get_peft_model(model, peft_config)
+        model.print_trainable_parameters()
 
     if config.block_size == -1:
         config.block_size = None
@@ -327,7 +348,9 @@ def train(config):
         per_device_eval_batch_size=config.batch_size,
         learning_rate=config.lr,
         num_train_epochs=config.epochs,
-        evaluation_strategy=config.evaluation_strategy if config.valid_split is not None else "no",
+        evaluation_strategy=config.evaluation_strategy
+        if config.valid_split is not None
+        else "no",
         logging_steps=logging_steps,
         save_total_limit=config.save_total_limit,
         save_strategy=config.save_strategy,
@@ -341,6 +364,7 @@ def train(config):
         max_grad_norm=config.max_grad_norm,
         fp16=config.fp16,
         push_to_hub=False,
+        logging_strategy="steps",
         load_best_model_at_end=True if config.valid_split is not None else False,
         ddp_find_unused_parameters=False,
         gradient_checkpointing=not config.disable_gradient_checkpointing,
@@ -353,7 +377,7 @@ def train(config):
     else:
         args = TrainingArguments(**training_args)
 
-    callbacks = []
+    callbacks = [EvaluateOnEveryPercentCallback([25, 50, 75, 90])]
     if config.use_peft:
         callbacks.append(SavePeftModelCallback)
         if config.valid_split is not None:
@@ -364,6 +388,29 @@ def train(config):
         model=model,
     )
 
+    def compute_metrics(eval_preds: EvalPrediction):
+        predictions, label_ids, inputs = eval_preds.predictions, eval_preds.label_ids, eval_preds.inputs
+        predictions = np.argmax(predictions, -1)
+        preds, refs = [], []
+        bleu = evaluate.load("bleu")
+        rouge = evaluate.load("rouge")
+        for pred, labels in zip(predictions, label_ids):
+            npr, nl = [], []
+            for ptok, ltok in zip(pred, labels):
+                if ltok == -100: continue
+                npr.append(ptok)
+                nl.append(ltok)
+            preds.append(tokenizer.decode(npr))
+            refs.append([tokenizer.decode(nl)])
+        rouge_results = rouge.compute(predictions=preds, references=refs)
+        bleu_results = bleu.compute(predictions=preds, references=refs)
+        rouge_results = {"rouge_"+k:v for k, v in rouge_results.items()}
+        bleu_results = {"bleu_"+k:v for k, v in bleu_results.items()}
+        metrics = {}
+        metrics.update(rouge_results)
+        metrics.update(bleu_results)
+        return metrics
+
     if config.trainer == "default":
         trainer = Trainer(
             **trainer_args,
@@ -371,6 +418,7 @@ def train(config):
             eval_dataset=valid_data if config.valid_split is not None else None,
             tokenizer=tokenizer,
             data_collator=default_data_collator,
+            compute_metrics=compute_metrics,
             callbacks=callbacks,
         )
     elif config.trainer == "sft":
@@ -381,6 +429,7 @@ def train(config):
             peft_config=peft_config if config.use_peft else None,
             dataset_text_field=config.text_column,
             max_seq_length=config.block_size,
+            compute_metrics=compute_metrics,
             tokenizer=tokenizer,
             packing=True,
         )
@@ -458,20 +507,29 @@ def train(config):
             )
         except Exception as e:
             logger.warning(f"Failed to merge adapter weights: {e}")
-            logger.warning("Skipping adapter merge. Only adapter weights will be saved.")
+            logger.warning(
+                "Skipping adapter merge. Only adapter weights will be saved."
+            )
 
     if config.push_to_hub:
         if PartialState().process_index == 0:
             logger.info("Pushing model to hub...")
             if os.path.exists(f"{config.project_name}/training_params.json"):
-                training_params = json.load(open(f"{config.project_name}/training_params.json"))
+                training_params = json.load(
+                    open(f"{config.project_name}/training_params.json")
+                )
                 training_params.pop("token")
                 json.dump(
                     training_params,
                     open(f"{config.project_name}/training_params.json", "w"),
                 )
+                # config_json = json.load(open(f"{config.project_name}/config.json"))
+                # config_json["_name_or_path"] = config.project_name
+                # json.dump(config_json, open(f"{config.project_name}/config.json", "w"))
             api = HfApi(token=config.token)
-            api.create_repo(repo_id=config.repo_id, repo_type="model", private=True)
+            api.create_repo(
+                repo_id=config.repo_id, repo_type="model", private=True, exist_ok=True
+            )
             api.upload_folder(
                 folder_path=config.project_name,
                 repo_id=config.repo_id,
