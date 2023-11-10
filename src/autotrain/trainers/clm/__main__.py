@@ -14,6 +14,7 @@ from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
+    AutoModelForSequenceClassification,
     AutoTokenizer,
     BitsAndBytesConfig,
     Trainer,
@@ -21,6 +22,8 @@ from transformers import (
     EvalPrediction,
     default_data_collator,
 )
+
+from trl import DPOTrainer, RewardConfig, RewardTrainer, SFTTrainer
 import evaluate
 import numpy as np
 from transformers.utils import quantization_config
@@ -52,10 +55,6 @@ def train(config):
     if config.repo_id is None and config.username is not None:
         config.repo_id = f"{config.username}/{config.project_name}"
 
-    # TODO: remove when SFT is fixed
-    # if config.trainer == "sft":
-    #     config.trainer = "default"
-
     # check if config.train_split.csv exists in config.data_path
     if config.train_split is not None:
         train_path = f"{config.data_path}/{config.train_split}.csv"
@@ -70,7 +69,17 @@ def train(config):
                 split=config.train_split,
                 token=config.token,
             )
-
+        # rename columns for reward trainer
+        if config.trainer in ("dpo", "reward"):
+            if not (config.text_column == "chosen" and config.text_column in train_data.column_names):
+                train_data = train_data.rename_column(config.text_column, "chosen")
+            if not (
+                config.rejected_text_column == "rejected" and config.rejected_text_column in train_data.column_names
+            ):
+                train_data = train_data.rename_column(config.rejected_text_column, "rejected")
+        if config.trainer == "dpo":
+            if not (config.prompt_text_column == "prompt" and config.prompt_text_column in train_data.column_names):
+                train_data = train_data.rename_column(config.prompt_text_column, "prompt")
     if config.valid_split is not None:
         valid_path = f"{config.data_path}/{config.valid_split}.csv"
         if os.path.exists(valid_path):
@@ -85,6 +94,17 @@ def train(config):
                 token=config.token,
             )
 
+        if config.trainer in ("dpo", "reward"):
+            if not (config.text_column == "chosen" and config.text_column in valid_data.column_names):
+                valid_data = valid_data.rename_column(config.text_column, "chosen")
+            if not (
+                config.rejected_text_column == "rejected" and config.rejected_text_column in valid_data.column_names
+            ):
+                valid_data = valid_data.rename_column(config.rejected_text_column, "rejected")
+        if config.trainer == "dpo":
+            if not (config.prompt_text_column == "prompt" and config.prompt_text_column in valid_data.column_names):
+                valid_data = valid_data.rename_column(config.prompt_text_column, "prompt")
+
     tokenizer = AutoTokenizer.from_pretrained(
         config.model,
         token=config.token,
@@ -96,6 +116,9 @@ def train(config):
 
     if getattr(tokenizer, "pad_token", None) is None:
         tokenizer.pad_token = tokenizer.eos_token
+
+    if getattr(tokenizer, "pad_token_id", None) is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
 
     if config.trainer == "default":
         train_data = utils.process_data(
@@ -115,6 +138,10 @@ def train(config):
         token=config.token,
         trust_remote_code=True,
     )
+    if config.trainer == "reward":
+        model_config.num_labels = 1
+        model_config.pad_token_id = tokenizer.pad_token_id
+        model_config.pad_token = tokenizer.pad_token
 
     if config.use_peft:
         extra_confs = dict(
@@ -131,36 +158,91 @@ def train(config):
                 bnb_4bit_compute_dtype=torch.float16,
                 bnb_4bit_use_double_quant=False,
             )
+            config.fp16 = True
         elif config.use_int8:
             bnb_config = BitsAndBytesConfig(load_in_8bit=config.use_int8)
+            config.fp16 = True
         else:
             bnb_config = None
 
-        if bnb_config:
-            extra_confs.update(dict(quantization_config=bnb_config))
-
-        model = AutoModelForCausalLM.from_pretrained(config.model, **extra_confs)
+        if config.trainer == "reward":
+            model = AutoModelForSequenceClassification.from_pretrained(
+                config.model,
+                config=model_config,
+                token=config.token,
+                quantization_config=bnb_config,
+                torch_dtype=torch.float16,
+                device_map={"": Accelerator().process_index} if torch.cuda.is_available() else None,
+                trust_remote_code=True,
+                use_flash_attention_2=config.use_flash_attention_2,
+            )
+        else:
+            model = AutoModelForCausalLM.from_pretrained(
+                config.model,
+                config=model_config,
+                token=config.token,
+                quantization_config=bnb_config,
+                torch_dtype=torch.float16,
+                device_map={"": Accelerator().process_index} if torch.cuda.is_available() else None,
+                trust_remote_code=True,
+                use_flash_attention_2=config.use_flash_attention_2,
+            )
+            model_ref = None
     else:
-        model = AutoModelForCausalLM.from_pretrained(
-            config.model,
-            config=model_config,
-            token=config.token,
-            trust_remote_code=True,
-        )
+        if config.trainer == "reward":
+            model = AutoModelForSequenceClassification.from_pretrained(
+                config.model,
+                trust_remote_code=True,
+                num_labels=1,
+                use_flash_attention_2=config.use_flash_attention_2,
+            )
+        else:
+            model = AutoModelForCausalLM.from_pretrained(
+                config.model,
+                config=model_config,
+                token=config.token,
+                trust_remote_code=True,
+                use_flash_attention_2=config.use_flash_attention_2,
+            )
+            if config.model_ref is not None:
+                model_ref = AutoModelForCausalLM.from_pretrained(
+                    config.model_ref,
+                    config=model_config,
+                    token=config.token,
+                    trust_remote_code=True,
+                    use_flash_attention_2=config.use_flash_attention_2,
+                )
+
 
     model.resize_token_embeddings(len(tokenizer))
 
     if config.use_peft:
         if config.use_int8 or config.use_int4:
-            model = prepare_model_for_kbit_training(model)
-        peft_config = LoraConfig(
-            r=config.lora_r,
-            lora_alpha=config.lora_alpha,
-            lora_dropout=config.lora_dropout,
-            bias="none",
-            task_type="CAUSAL_LM",
-            target_modules=utils.get_target_modules(config),
-        )
+            model = prepare_model_for_kbit_training(
+                model,
+                use_gradient_checkpointing=not config.disable_gradient_checkpointing,
+            )
+        else:
+            model.enable_input_require_grads()
+        if config.trainer == "reward":
+            peft_config = LoraConfig(
+                r=config.lora_r,
+                lora_alpha=config.lora_alpha,
+                lora_dropout=config.lora_dropout,
+                bias="none",
+                task_type="SEQ_CLS",
+                target_modules=utils.get_target_modules(config),
+                # modules_to_save=["scores"],
+            )
+        else:
+            peft_config = LoraConfig(
+                r=config.lora_r,
+                lora_alpha=config.lora_alpha,
+                lora_dropout=config.lora_dropout,
+                bias="none",
+                task_type="CAUSAL_LM",
+                target_modules=utils.get_target_modules(config),
+            )
         model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
 
@@ -185,6 +267,7 @@ def train(config):
         block_size = min(config.block_size, tokenizer.model_max_length)
 
     config.block_size = block_size
+    logger.info(f"Using block size {block_size}")
 
     if config.trainer == "default":
         tokenize_fn = partial(utils.tokenize, tokenizer=tokenizer, config=config)
@@ -222,6 +305,30 @@ def train(config):
                 desc=f"Grouping texts in chunks of {block_size}",
             )
 
+    elif config.trainer == "reward":
+        reward_proc = partial(utils.preprocess_reward, tokenizer=tokenizer)
+        train_data = train_data.map(
+            reward_proc,
+            batched=True,
+            num_proc=4,
+            desc="Running tokenizer on train dataset",
+        )
+        train_data = train_data.filter(
+            lambda x: len(x["input_ids_chosen"]) <= config.block_size
+            and len(x["input_ids_rejected"]) <= config.block_size
+        )
+        if config.valid_split is not None:
+            valid_data = valid_data.map(
+                reward_proc,
+                batched=True,
+                num_proc=4,
+                desc="Running tokenizer on validation dataset",
+            )
+            valid_data = valid_data.filter(
+                lambda x: len(x["input_ids_chosen"]) <= config.block_size
+                and len(x["input_ids_rejected"]) <= config.block_size
+            )
+
     logger.info("creating trainer")
     # trainer specific
     if config.logging_steps == -1:
@@ -248,7 +355,7 @@ def train(config):
         save_total_limit=config.save_total_limit,
         save_strategy=config.save_strategy,
         gradient_accumulation_steps=config.gradient_accumulation,
-        report_to="tensorboard",
+        report_to=config.log,
         auto_find_batch_size=config.auto_find_batch_size,
         lr_scheduler_type=config.scheduler,
         optim=config.optimizer,
@@ -260,9 +367,15 @@ def train(config):
         logging_strategy="steps",
         load_best_model_at_end=True if config.valid_split is not None else False,
         ddp_find_unused_parameters=False,
+        gradient_checkpointing=not config.disable_gradient_checkpointing,
+        remove_unused_columns=False,
     )
 
-    args = TrainingArguments(**training_args)
+    if config.trainer == "reward":
+        training_args["max_length"] = config.block_size
+        args = RewardConfig(**training_args)
+    else:
+        args = TrainingArguments(**training_args)
 
     callbacks = [EvaluateOnEveryPercentCallback([25, 50, 75, 90])]
     if config.use_peft:
@@ -319,6 +432,41 @@ def train(config):
             compute_metrics=compute_metrics,
             tokenizer=tokenizer,
             packing=True,
+        )
+    elif config.trainer == "reward":
+        trainer = RewardTrainer(
+            **trainer_args,
+            train_dataset=train_data,
+            eval_dataset=valid_data if config.valid_split is not None else None,
+            peft_config=peft_config,
+            tokenizer=tokenizer,
+        )
+    elif config.trainer == "dpo":
+        if isinstance(config.block_size, int):
+            max_length = config.block_size
+            max_prompt_length = None
+            max_target_length = None
+        elif isinstance(config.block_size, list):
+            if len(config.block_size) == 3:
+                max_length, max_prompt_length, max_target_length = config.block_size
+            elif len(config.block_size) == 2:
+                max_length, max_prompt_length = config.block_size
+                max_target_length = None
+            else:
+                raise ValueError(f"block_size must be a list of length 2 or 3, got {config.block_size}")
+        else:
+            raise ValueError(f"block_size must be an int or a list, got {config.block_size}")
+        trainer = DPOTrainer(
+            **trainer_args,
+            ref_model=model_ref,
+            beta=config.dpo_beta,
+            train_dataset=train_data,
+            eval_dataset=valid_data if config.valid_split is not None else None,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            max_prompt_length=max_prompt_length,
+            max_target_length=max_target_length,
+            peft_config=peft_config,
         )
     else:
         raise ValueError(f"trainer `{config.trainer}` not supported")

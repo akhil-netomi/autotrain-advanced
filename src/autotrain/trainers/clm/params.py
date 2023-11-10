@@ -1,4 +1,5 @@
 import os
+from typing import List, Union
 
 from pydantic import BaseModel, Field
 
@@ -12,6 +13,7 @@ class LLMTrainingParams(BaseModel):
     train_split: str = Field("train", title="Train data config")
     valid_split: str = Field(None, title="Validation data config")
     text_column: str = Field("text", title="Text column")
+    rejected_text_column: str = Field(None, title="Rejected text column")
     token: str = Field(None, title="Huggingface token")
     lr: float = Field(3e-5, title="Learning rate")
     epochs: int = Field(1, title="Number of training epochs")
@@ -24,7 +26,7 @@ class LLMTrainingParams(BaseModel):
     max_grad_norm: float = Field(1.0, title="Max gradient norm")
     seed: int = Field(42, title="Seed")
     add_eos_token: bool = Field(True, title="Add EOS token")
-    block_size: int = Field(-1, title="Block size")
+    block_size: Union[int, List[int]] = Field(-1, title="Block size")
     use_peft: bool = Field(False, title="Use PEFT")
     lora_r: int = Field(16, title="Lora r")
     lora_alpha: int = Field(32, title="Lora alpha")
@@ -45,6 +47,11 @@ class LLMTrainingParams(BaseModel):
     merge_adapter: bool = Field(False, title="Merge adapter")
     username: str = Field(None, title="Hugging Face Username")
     use_flash_attention_2: bool = Field(False, title="Use flash attention 2")
+    log: str = Field("none", title="Logging using experiment tracking")
+    disable_gradient_checkpointing: bool = Field(False, title="Gradient checkpointing")
+    model_ref: str = Field(None, title="Reference, for DPO trainer")
+    dpo_beta: float = Field(0.1, title="Beta for DPO trainer")
+    prompt_text_column: str = Field(None, title="Prompt text column")
 
     def save(self, output_dir):
         os.makedirs(output_dir, exist_ok=True)

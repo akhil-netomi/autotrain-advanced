@@ -1,4 +1,4 @@
-FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
+FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=UTC
@@ -54,15 +54,15 @@ RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
     && rm -f Miniconda3-latest-Linux-x86_64.sh
 ENV PATH /app/miniconda/bin:$PATH
 
-RUN conda create -p /app/env -y python=3.9
+RUN conda create -p /app/env -y python=3.10
 
 SHELL ["conda", "run","--no-capture-output", "-p","/app/env", "/bin/bash", "-c"]
 
-RUN conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia && conda clean -ya
-RUN pip install xformers
+RUN conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia && conda clean -ya
 COPY --chown=1000:1000 . /app/
 
 RUN pip install -e .
-RUN pip install git+https://github.com/huggingface/peft.git
-RUN pip install git+https://github.com/huggingface/trl.git
+
+RUN python -m nltk.downloader punkt
+RUN autotrain setup
 RUN pip install flash-attn

@@ -17,6 +17,10 @@ DEFAULT_BOS_TOKEN = "</s>"
 DEFAULT_UNK_TOKEN = "</s>"
 TARGET_MODULES = {
     "Salesforce/codegen25-7b-multi": "q_proj,k_proj,v_proj,o_proj,down_proj,up_proj,gate_proj",
+    "HuggingFaceH4/zephyr-7b-beta": "q_proj,v_proj",
+    "HuggingFaceH4/zephyr-7b-alpha": "q_proj,v_proj",
+    "mistralai/Mistral-7B-Instruct-v0.1": "q_proj,v_proj",
+    "mistralai/Mistral-7B-v0.1": "q_proj,v_proj",
 }
 
 MODEL_CARD = """
@@ -30,6 +34,27 @@ widget:
 
 # Model is trained using Netomi LLM Trainer
 """
+
+
+
+def preprocess_reward(examples, tokenizer):
+    new_examples = {
+        "input_ids_chosen": [],
+        "attention_mask_chosen": [],
+        "input_ids_rejected": [],
+        "attention_mask_rejected": [],
+    }
+    for chosen, rejected in zip(examples["chosen"], examples["rejected"]):
+        tokenized_chosen = tokenizer(chosen, truncation=True)
+        tokenized_rejected = tokenizer(rejected, truncation=True)
+
+        new_examples["input_ids_chosen"].append(tokenized_chosen["input_ids"])
+        new_examples["attention_mask_chosen"].append(tokenized_chosen["attention_mask"])
+        new_examples["input_ids_rejected"].append(tokenized_rejected["input_ids"])
+        new_examples["attention_mask_rejected"].append(tokenized_rejected["attention_mask"])
+
+    return new_examples
+
 
 def get_target_modules(config):
     if config.target_modules is None:

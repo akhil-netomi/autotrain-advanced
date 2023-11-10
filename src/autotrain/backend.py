@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import subprocess
 from dataclasses import dataclass
 from typing import Union
 
@@ -13,8 +14,19 @@ from autotrain.trainers.clm.params import LLMTrainingParams
 from autotrain.trainers.dreambooth.params import DreamBoothTrainingParams
 from autotrain.trainers.generic.params import GenericParams
 from autotrain.trainers.image_classification.params import ImageClassificationParams
+from autotrain.trainers.seq2seq.params import Seq2SeqParams
 from autotrain.trainers.tabular.params import TabularParams
 from autotrain.trainers.text_classification.params import TextClassificationParams
+
+
+_DOCKERFILE = """
+FROM huggingface/autotrain-advanced:latest
+
+CMD autotrain api --port 7860 --host 0.0.0.0
+"""
+
+# format _DOCKERFILE
+_DOCKERFILE = _DOCKERFILE.replace("\n", " ").replace("  ", "\n").strip()
 
 
 def _tabular_munge_data(params, username):
@@ -38,7 +50,7 @@ def _tabular_munge_data(params, username):
     if params.valid_split is not None:
         valid_data_path = f"{params.data_path}/{params.valid_split}.csv"
     else:
-        valid_data_path = []
+        valid_data_path = None
     if os.path.exists(train_data_path):
         dset = AutoTrainDataset(
             train_data=[train_data_path],
@@ -47,7 +59,7 @@ def _tabular_munge_data(params, username):
             project_name=params.project_name,
             username=username,
             column_mapping={"id": params.col_map_id, "label": col_map_label},
-            valid_data=valid_data_path,
+            valid_data=[valid_data_path] if valid_data_path is not None else None,
             percent_valid=None,  # TODO: add to UI
         )
         dset.prepare()
@@ -61,7 +73,7 @@ def _llm_munge_data(params, username):
     if params.valid_split is not None:
         valid_data_path = f"{params.data_path}/{params.valid_split}.csv"
     else:
-        valid_data_path = []
+        valid_data_path = None
     if os.path.exists(train_data_path):
         dset = AutoTrainDataset(
             train_data=[train_data_path],
@@ -70,7 +82,30 @@ def _llm_munge_data(params, username):
             project_name=params.project_name,
             username=username,
             column_mapping={"text": params.text_column},
-            valid_data=valid_data_path,
+            valid_data=[valid_data_path] if valid_data_path is not None else None,
+            percent_valid=None,  # TODO: add to UI
+        )
+        dset.prepare()
+        return f"{username}/autotrain-data-{params.project_name}"
+
+    return params.data_path
+
+
+def _seq2seq_munge_data(params, username):
+    train_data_path = f"{params.data_path}/{params.train_split}.csv"
+    if params.valid_split is not None:
+        valid_data_path = f"{params.data_path}/{params.valid_split}.csv"
+    else:
+        valid_data_path = None
+    if os.path.exists(train_data_path):
+        dset = AutoTrainDataset(
+            train_data=[train_data_path],
+            task="seq2seq",
+            token=params.token,
+            project_name=params.project_name,
+            username=username,
+            column_mapping={"text": params.text_column, "label": params.target_column},
+            valid_data=[valid_data_path] if valid_data_path is not None else None,
             percent_valid=None,  # TODO: add to UI
         )
         dset.prepare()
@@ -208,7 +243,15 @@ class EndpointsRunner:
 
 @dataclass
 class SpaceRunner:
-    params: Union[TextClassificationParams, ImageClassificationParams, LLMTrainingParams, GenericParams, TabularParams]
+    params: Union[
+        TextClassificationParams,
+        ImageClassificationParams,
+        LLMTrainingParams,
+        GenericParams,
+        TabularParams,
+        DreamBoothTrainingParams,
+        Seq2SeqParams,
+    ]
     backend: str
 
     def __post_init__(self):
@@ -220,6 +263,7 @@ class SpaceRunner:
             "t4s": "t4-small",
             "cpu": "cpu-upgrade",
             "cpuf": "cpu-basic",
+            "dgx-a100": "dgxa100.80g.1.norm",
         }
         if not isinstance(self.params, GenericParams):
             if self.params.repo_id is not None:
@@ -231,6 +275,9 @@ class SpaceRunner:
         else:
             self.username = self.params.username
 
+        if self.params.repo_id is None and self.params.username is not None:
+            self.params.repo_id = f"{self.params.username}/{self.params.project_name}"
+
         if isinstance(self.params, LLMTrainingParams):
             self.task_id = 9
         elif isinstance(self.params, TextClassificationParams):
@@ -241,6 +288,8 @@ class SpaceRunner:
             self.task_id = 27
         elif isinstance(self.params, DreamBoothTrainingParams):
             self.task_id = 25
+        elif isinstance(self.params, Seq2SeqParams):
+            self.task_id = 28
         else:
             raise NotImplementedError
 
@@ -270,6 +319,11 @@ class SpaceRunner:
         if isinstance(self.params, DreamBoothTrainingParams):
             self.task_id = 25
             data_path = _dreambooth_munge_data(self.params, self.username)
+            space_id = self._create_space()
+            return space_id
+        if isinstance(self.params, Seq2SeqParams):
+            self.task_id = 28
+            data_path = _seq2seq_munge_data(self.params, self.username)
             space_id = self._create_space()
             return space_id
         raise NotImplementedError
@@ -309,6 +363,30 @@ class SpaceRunner:
             api.add_space_secret(repo_id=repo_id, key="OUTPUT_MODEL_REPO", value=self.params.repo_id)
 
     def _create_space(self):
+        if self.backend.startswith("dgx-"):
+            env_vars = {
+                "HF_TOKEN": self.params.token,
+                "AUTOTRAIN_USERNAME": self.username,
+                "PROJECT_NAME": self.params.project_name,
+                "TASK_ID": str(self.task_id),
+                "PARAMS": json.dumps(self.params.json()),
+            }
+            if isinstance(self.params, DreamBoothTrainingParams):
+                env_vars["DATA_PATH"] = self.params.image_path
+            else:
+                env_vars["DATA_PATH"] = self.params.data_path
+
+            if not isinstance(self.params, GenericParams):
+                env_vars["MODEL"] = self.params.model
+                env_vars["OUTPUT_MODEL_REPO"] = self.params.repo_id
+
+            ngc_runner = NGCRunner(
+                job_name=self.params.repo_id.replace("/", "-"),
+                env_vars=env_vars,
+                backend=self.backend,
+            )
+            ngc_runner.create()
+            return
         api = HfApi(token=self.params.token)
         repo_id = f"{self.username}/autotrain-{self.params.project_name}"
         api.create_repo(
@@ -327,8 +405,7 @@ class SpaceRunner:
             repo_type="space",
         )
 
-        _dockerfile = "FROM huggingface/autotrain-advanced:latest\nCMD autotrain setup && autotrain api --port 7860 --host 0.0.0.0"
-        _dockerfile = io.BytesIO(_dockerfile.encode())
+        _dockerfile = io.BytesIO(_DOCKERFILE.encode())
         api.upload_file(
             path_or_fileobj=_dockerfile,
             path_in_repo="Dockerfile",
@@ -336,3 +413,42 @@ class SpaceRunner:
             repo_type="space",
         )
         return repo_id
+
+
+@dataclass
+class NGCRunner:
+    job_name: str
+    env_vars: dict
+    backend: str
+
+    def __post_init__(self):
+        self.ngc_ace = os.environ.get("NGC_ACE")
+        self.ngc_org = os.environ.get("NGC_ORG")
+        self.instance_map = {
+            "dgx-a100": "dgxa100.80g.1.norm",
+        }
+        logger.info("Creating NGC Job")
+        logger.info(f"NGC_ACE: {self.ngc_ace}")
+        logger.info(f"NGC_ORG: {self.ngc_org}")
+        logger.info(f"job_name: {self.job_name}")
+        logger.info(f"backend: {self.backend}")
+
+    def create(self):
+        cmd = "ngc base-command job run --name {job_name}"
+        cmd += " --priority NORMAL --order 50 --preempt RUNONCE --min-timeslice 0s"
+        cmd += " --total-runtime 3600s --ace {ngc_ace} --org {ngc_org} --instance {instance}"
+        cmd += " --commandline 'set -x; conda run --no-capture-output -p /app/env autotrain api --port 7860 --host 0.0.0.0' -p 7860 --result /results"
+        cmd += " --image '{ngc_org}/autotrain-advanced:latest'"
+
+        cmd = cmd.format(
+            job_name=self.job_name,
+            ngc_ace=self.ngc_ace,
+            ngc_org=self.ngc_org,
+            instance=self.instance_map[self.backend],
+        )
+
+        for k, v in self.env_vars.items():
+            cmd += f" --env-var {k}:{v}"
+
+        # run using subprocess, wait for completion
+        subprocess.run(cmd, shell=True, check=True)

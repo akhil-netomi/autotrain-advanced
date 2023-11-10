@@ -68,8 +68,30 @@ class RunAutoTrainLLMCommand(BaseAutoTrainCommand):
                 "alias": ["--text-column"],
             },
             {
+                "arg": "--rejected_text_column",
+                "help": "Rejected text column to use",
+                "required": False,
+                "type": str,
+                "default": "rejected",
+                "alias": ["--rejected-text-column"],
+            },
+            {
+                "arg": "--prompt-text-column",
+                "help": "Prompt text column to use",
+                "required": False,
+                "type": str,
+                "default": "prompt",
+                "alias": ["--prompt-text-column"],
+            },
+            {
                 "arg": "--model",
                 "help": "Model to use",
+                "required": False,
+                "type": str,
+            },
+            {
+                "arg": "--model-ref",
+                "help": "Reference model to use for DPO when not using PEFT",
                 "required": False,
                 "type": str,
             },
@@ -161,8 +183,8 @@ class RunAutoTrainLLMCommand(BaseAutoTrainCommand):
                 "arg": "--block_size",
                 "help": "Block size to use",
                 "required": False,
-                "type": int,
-                "default": -1,
+                "type": str,
+                "default": "-1",
                 "alias": ["--block-size"],
             },
             {
@@ -332,6 +354,28 @@ class RunAutoTrainLLMCommand(BaseAutoTrainCommand):
                 "action": "store_true",
                 "alias": ["--use-flash-attention-2", "--use-fa2"],
             },
+            {
+                "arg": "--log",
+                "help": "Use experiment tracking",
+                "required": False,
+                "type": str,
+                "default": "none",
+            },
+            {
+                "arg": "--disable_gradient_checkpointing",
+                "help": "Disable gradient checkpointing",
+                "required": False,
+                "action": "store_true",
+                "alias": ["--disable-gradient-checkpointing", "--disable-gc"],
+            },
+            {
+                "arg": "--dpo-beta",
+                "help": "Beta for DPO trainer",
+                "required": False,
+                "type": float,
+                "default": 0.1,
+                "alias": ["--dpo-beta"],
+            },
         ]
         run_llm_parser = parser.add_parser("llm", description="✨ Run AutoTrain LLM")
         for arg in arg_list:
@@ -372,10 +416,19 @@ class RunAutoTrainLLMCommand(BaseAutoTrainCommand):
             "use_int4",
             "merge_adapter",
             "use_flash_attention_2",
+            "disable_gradient_checkpointing",
         ]
         for arg_name in store_true_arg_names:
             if getattr(self.args, arg_name) is None:
                 setattr(self.args, arg_name, False)
+
+        block_size_split = self.args.block_size.strip().split(",")
+        if len(block_size_split) == 1:
+            self.args.block_size = int(block_size_split[0])
+        elif len(block_size_split) > 1:
+            self.args.block_size = [int(x.strip()) for x in block_size_split]
+        else:
+            raise ValueError("Invalid block size")
 
         if self.args.train:
             if self.args.project_name is None:
@@ -385,13 +438,17 @@ class RunAutoTrainLLMCommand(BaseAutoTrainCommand):
             if self.args.model is None:
                 raise ValueError("Model must be specified")
             if self.args.push_to_hub:
-                if self.args.repo_id is None:
-                    raise ValueError("Repo id must be specified for push to hub")
+                # must have project_name, username and token OR project_name, repo_id, token
+                if self.args.username is None and self.args.repo_id is None:
+                    raise ValueError("Username or repo id must be specified for push to hub")
+                if self.args.token is None:
+                    raise ValueError("Token must be specified for push to hub")
+
             if self.args.backend.startswith("spaces") or self.args.backend.startswith("ep-"):
                 if not self.args.push_to_hub:
                     raise ValueError("Push to hub must be specified for spaces backend")
-                if self.args.repo_id is None:
-                    raise ValueError("Repo id must be specified for spaces backend")
+                if self.args.username is None and self.args.repo_id is None:
+                    raise ValueError("Repo id or username must be specified for spaces backend")
                 if self.args.token is None:
                     raise ValueError("Token must be specified for spaces backend")
 
@@ -399,7 +456,9 @@ class RunAutoTrainLLMCommand(BaseAutoTrainCommand):
             from autotrain.infer.text_generation import TextGenerationInference
 
             tgi = TextGenerationInference(
-                self.args.project_name, use_int4=self.args.use_int4, use_int8=self.args.use_int8
+                self.args.project_name,
+                use_int4=self.args.use_int4,
+                use_int8=self.args.use_int8,
             )
             while True:
                 prompt = input("User: ")
@@ -407,13 +466,17 @@ class RunAutoTrainLLMCommand(BaseAutoTrainCommand):
                     break
                 print(f"Bot: {tgi.chat(prompt)}")
 
-        if not torch.cuda.is_available() and torch.backends.mps.is_available():
-            self.num_gpus = "mac"
-        elif not torch.cuda.is_available():
-            raise ValueError("No GPU found. Please install CUDA and try again.")
-        else:
-            self.num_gpus = torch.cuda.device_count()
+        cuda_available = torch.cuda.is_available()
+        mps_available = torch.backends.mps.is_available()
 
+        if not cuda_available and not mps_available:
+            raise ValueError("No GPU/MPS device found. LLM training requires an accelerator")
+
+        if cuda_available:
+            self.num_gpus = torch.cuda.device_count()
+        elif mps_available:
+            self.num_gpus = 1
+            
     def run(self):
         from autotrain.backend import EndpointsRunner, SpaceRunner
         from autotrain.trainers.clm.__main__ import train as train_llm
@@ -462,10 +525,16 @@ class RunAutoTrainLLMCommand(BaseAutoTrainCommand):
                 merge_adapter=self.args.merge_adapter,
                 username=self.args.username,
                 use_flash_attention_2=self.args.use_flash_attention_2,
+                log=self.args.log,
+                rejected_text_column=self.args.rejected_text_column,
+                disable_gradient_checkpointing=self.args.disable_gradient_checkpointing,
+                model_ref=self.args.model_ref,
+                dpo_beta=self.args.dpo_beta,
+                prompt_text_column=self.args.prompt_text_column,
             )
 
             # space training
-            if self.args.backend.startswith("spaces"):
+            if self.args.backend.startswith("spaces") or self.args.backend.startswith("dgx"):
                 logger.info("Creating space...")
                 sr = SpaceRunner(
                     params=params,
@@ -490,7 +559,14 @@ class RunAutoTrainLLMCommand(BaseAutoTrainCommand):
             if self.num_gpus == 1:
                 train_llm(params)
             else:
-                cmd = ["accelerate", "launch", "--multi_gpu", "--num_machines", "1", "--num_processes"]
+                cmd = [
+                    "accelerate",
+                    "launch",
+                    "--multi_gpu",
+                    "--num_machines",
+                    "1",
+                    "--num_processes",
+                ]
                 cmd.append(str(self.num_gpus))
                 if self.num_gpus=="mac":
                     cmd.pop()
